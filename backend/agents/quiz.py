@@ -4,29 +4,56 @@ from typing import Dict, Any, List
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
+
 from backend.config import GROQ_API_KEY, GROQ_MODEL
 from backend.rag.retriever import get_retriever
 
 
 QUIZ_PROMPT = """
-You are an AI tutor creating quizzes from study material.
+You are an AI tutor generating quizzes STRICTLY from the provided context.
 
 Rules:
 - Use ONLY the provided context.
-- Create {num_questions} questions.
-- Mix conceptual and factual questions.
-- Provide answers with short explanations.
+- Generate EXACTLY:
+  - 3 MCQs (4 options each, one correct)
+  - 2 descriptive questions (conceptual)
+- Provide answers clearly.
+- Do NOT invent information.
 - If context is insufficient, say so.
 
-Format strictly as:
+Output format EXACTLY:
 
-Q1. ...
-A1. ...
-Explanation: ...
+MCQ 1:
+Question: ...
+A) ...
+B) ...
+C) ...
+D) ...
+Answer: <A/B/C/D>
 
-Q2. ...
-A2. ...
-Explanation: ...
+MCQ 2:
+Question: ...
+A) ...
+B) ...
+C) ...
+D) ...
+Answer: <A/B/C/D>
+
+MCQ 3:
+Question: ...
+A) ...
+B) ...
+C) ...
+D) ...
+Answer: <A/B/C/D>
+
+DESCRIPTIVE 1:
+Question: ...
+Answer: ...
+
+DESCRIPTIVE 2:
+Question: ...
+Answer: ...
 """
 
 
@@ -38,13 +65,67 @@ def get_llm() -> ChatGroq:
     )
 
 
-def generate_quiz(topic: str, num_questions: int = 5, k: int = 4) -> Dict[str, Any]:
+def _separate_quiz_and_answers(text: str) -> Dict[str, Any]:
+    """
+    Splits quiz text into:
+    - visible quiz (no answers)
+    - answer key (MCQs + descriptive)
+    """
+
+    visible_lines = []
+    mcq_answers = []
+    descriptive_answers = []
+
+    current_section = None
+
+    for line in text.splitlines():
+        stripped = line.strip()
+
+        if stripped.startswith("Answer:"):
+            mcq_answers.append(stripped.replace("Answer:", "").strip())
+            continue
+
+        if stripped.startswith("DESCRIPTIVE"):
+            current_section = "DESCRIPTIVE"
+            visible_lines.append(line)
+            continue
+
+        if stripped.startswith("Answer:") and current_section == "DESCRIPTIVE":
+            descriptive_answers.append(stripped.replace("Answer:", "").strip())
+            continue
+
+        if stripped.startswith("Answer:") is False:
+            visible_lines.append(line)
+
+        # capture descriptive answers separately
+        if current_section == "DESCRIPTIVE" and stripped.startswith("Answer:"):
+            descriptive_answers.append(
+                stripped.replace("Answer:", "").strip()
+            )
+
+    return {
+        "visible_quiz": "\n".join(visible_lines).strip(),
+        "mcq_answers": mcq_answers,
+        "descriptive_answers": descriptive_answers,
+    }
+
+
+def generate_quiz(topic: str, k: int = 4) -> Dict[str, Any]:
+    """
+    Generates a mixed quiz (3 MCQs + 2 descriptive) using RAG.
+    Returns:
+    - quiz (student visible)
+    - answer_key (internal)
+    - sources
+    """
+
     retriever = get_retriever(k=k)
     docs: List[Document] = retriever.invoke(topic)
 
     if not docs:
         return {
             "quiz": "I don't know based on the provided material.",
+            "answer_key": {},
             "sources": [],
         }
 
@@ -67,9 +148,10 @@ def generate_quiz(topic: str, num_questions: int = 5, k: int = 4) -> Dict[str, A
         {
             "topic": topic,
             "context": context,
-            "num_questions": num_questions,
         }
     )
+
+    parsed = _separate_quiz_and_answers(response.content)
 
     sources = [
         {
@@ -80,6 +162,10 @@ def generate_quiz(topic: str, num_questions: int = 5, k: int = 4) -> Dict[str, A
     ]
 
     return {
-        "quiz": response.content,
+        "quiz": parsed["visible_quiz"],     # ✅ shown to student
+        "answer_key": {                     # ✅ internal use only
+            "mcqs": parsed["mcq_answers"],
+            "descriptive": parsed["descriptive_answers"],
+        },
         "sources": sources,
     }
